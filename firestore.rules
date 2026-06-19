@@ -1,0 +1,64 @@
+rules_version = '2';
+service cloud.firestore {
+  match /databases/{database}/documents {
+
+    // 1. Global Safety Net - Default Deny Catch-All
+    match /{document=**} {
+      allow read, write: if false;
+    }
+
+    // STANDALONE VALIDATION BLUEPRINT & HELPERS
+    function isValidId(id) {
+      return id is string && id.size() <= 128 && id.matches('^[a-zA-Z0-9_\\-]+$');
+    }
+
+    function incoming() {
+      return request.resource.data;
+    }
+
+    function existing() {
+      return resource.data;
+    }
+
+    function isValidSharedFile(data) {
+      return data.keys().hasAll(['id', 'fileName', 'mimeType', 'size', 'uploadedAt', 'storagePath', 'downloadUrl', 'downloadCount'])
+        && data.id is string && data.id.size() <= 20
+        && data.fileName is string && data.fileName.size() <= 300
+        && data.mimeType is string && data.mimeType.size() <= 150
+        && data.size is int && data.size >= 0
+        && data.uploadedAt is string && data.uploadedAt.size() <= 50
+        && data.storagePath is string && data.storagePath.size() <= 500
+        && data.downloadUrl is string && data.downloadUrl.size() <= 1000
+        && data.downloadCount is int && data.downloadCount >= 0
+        && (!data.keys().hasAny(['passwordHash']) || data.passwordHash is string)
+        && (!data.keys().hasAny(['expiration']) || data.expiration is string)
+        && (!data.keys().hasAny(['analytics']) || data.analytics is list);
+    }
+
+    // 2. SHARED_FILES RULES MATCH BLOCK
+    match /shared_files/{fileId} {
+      // Allow single document reads (get) to resolve sharing pages globally
+      allow get: if isValidId(fileId);
+
+      // Block all bulk listing of file databases - prevents query scraping completely
+      allow list: if false;
+
+      // Unauthenticated / authenticated creation of secure sharing coordinates
+      allow create: if isValidId(fileId) 
+        && isValidSharedFile(incoming())
+        && incoming().id == fileId;
+
+      // Allow action-based updates only for incrementing stats on downloads
+      allow update: if isValidId(fileId)
+        && isValidSharedFile(incoming())
+        && (
+          // Action: Log Download (Increment downloadCount and append to analytics log list)
+          incoming().diff(existing()).affectedKeys().hasOnly(['downloadCount', 'analytics'])
+          && incoming().downloadCount == existing().downloadCount + 1
+        );
+
+      // Deny deletion on public files
+      allow delete: if false;
+    }
+  }
+}
